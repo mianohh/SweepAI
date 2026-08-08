@@ -1,0 +1,48 @@
+# SweepAI Configuration
+# Copy to config.toml and fill in your values
+
+[treasury]
+# Source hot wallet to monitor
+source_address = "0xYOUR_HOT_WALLET_ADDRESS"
+chain_id = "11155111"  # Sepolia testnet
+
+# Optional: ERC-20 token (omit for native ETH)
+# token_address = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+
+[policy]
+# Sweep when balance exceeds this (decimal string)
+sweep_threshold = "1.0"
+
+# Minimum amount per sweep (prevents dust)
+min_sweep_amount = "0.01"
+
+# Maximum single sweep transaction
+max_sweep_amount = "5.0"
+
+# Amount to retain for gas fees
+gas_reserve = "0.05"
+
+# Minimum seconds between sweeps
+cooldown_seconds = 3600
+
+# Allowed destination addresses (EIP-55 checksummed)
+allowed_destinations = [
+    "0xYOUR_VAULT_ADDRESS"
+]
+
+# Supported chain IDs
+chain_ids = ["11155111"]
+
+[keeperhub]
+# API key (kh_ prefix) - set via KEEPERHUB_API_KEY env var
+# api_key = "kh_xxx"
+
+# MCP endpoint
+mcp_endpoint = "https://app.keeperhub.com/mcp"
+
+# Direct Execution API endpoint
+api_endpoint = "https://app.keeperhub.com/api"
+
+[database]
+# SQLite database path
+path = "data/sweepai.db"

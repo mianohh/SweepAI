@@ -1,0 +1,22 @@
+[treasury]
+# Sepolia testnet - Vitalik's known address (for testing only)
+source_address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+chain_id = "11155111"
+
+[policy]
+sweep_threshold = "0.01"
+min_sweep_amount = "0.001"
+max_sweep_amount = "1.0"
+gas_reserve = "0.005"
+cooldown_seconds = 300
+allowed_destinations = [
+    "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+]
+chain_ids = ["11155111"]
+
+[keeperhub]
+mcp_endpoint = "https://app.keeperhub.com/mcp"
+api_endpoint = "https://app.keeperhub.com/api"
+
+[database]
+path = "data/sweepai.db"
