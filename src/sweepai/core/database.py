@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import aiosqlite
@@ -47,6 +48,12 @@ class Database:
         self.db_path = Path(db_path)
         self._conn: aiosqlite.Connection | None = None
 
+    def _ensure_connected(self) -> aiosqlite.Connection:
+        """Ensure database is connected and return connection."""
+        if self._conn is None:
+            raise RuntimeError("Database not connected. Call connect() first.")
+        return self._conn
+
     async def connect(self) -> None:
         """Open database connection and initialize schema."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,8 +70,8 @@ class Database:
 
     async def save_proposal(self, proposal: SweepProposal) -> None:
         """Save a sweep proposal."""
-        assert self._conn is not None, "Database not connected"
-        await self._conn.execute(
+        conn = self._ensure_connected()
+        await conn.execute(
             """INSERT OR REPLACE INTO proposals
                (id, source_address, destination_address, amount, chain_id,
                 token_address, reason, timestamp, status)
@@ -81,12 +88,12 @@ class Database:
                 proposal.status.value,
             ),
         )
-        await self._conn.commit()
+        await conn.commit()
 
     async def get_proposal(self, proposal_id: str) -> SweepProposal | None:
         """Retrieve a proposal by ID."""
-        assert self._conn is not None, "Database not connected"
-        cursor = await self._conn.execute(
+        conn = self._ensure_connected()
+        cursor = await conn.execute(
             "SELECT * FROM proposals WHERE id = ?", (proposal_id,)
         )
         row = await cursor.fetchone()
@@ -105,14 +112,14 @@ class Database:
 
     async def list_proposals(self, status: SweepState | None = None) -> list[SweepProposal]:
         """List proposals, optionally filtered by status."""
-        assert self._conn is not None, "Database not connected"
+        conn = self._ensure_connected()
         if status:
-            cursor = await self._conn.execute(
+            cursor = await conn.execute(
                 "SELECT * FROM proposals WHERE status = ? ORDER BY timestamp DESC",
                 (status.value,),
             )
         else:
-            cursor = await self._conn.execute(
+            cursor = await conn.execute(
                 "SELECT * FROM proposals ORDER BY timestamp DESC"
             )
         rows = await cursor.fetchall()
@@ -132,10 +139,8 @@ class Database:
 
     async def save_audit(self, record: AuditRecord) -> None:
         """Save an audit record."""
-        assert self._conn is not None, "Database not connected"
-        import json
-
-        await self._conn.execute(
+        conn = self._ensure_connected()
+        await conn.execute(
             """INSERT OR REPLACE INTO audit_records
                (id, proposal_id, execution_id, transaction_hash, status,
                 gas_used, error, timestamp, metadata)
@@ -152,19 +157,17 @@ class Database:
                 json.dumps(record.metadata),
             ),
         )
-        await self._conn.commit()
+        await conn.commit()
 
     async def get_audit(self, record_id: str) -> AuditRecord | None:
         """Retrieve an audit record by ID."""
-        assert self._conn is not None, "Database not connected"
-        cursor = await self._conn.execute(
+        conn = self._ensure_connected()
+        cursor = await conn.execute(
             "SELECT * FROM audit_records WHERE id = ?", (record_id,)
         )
         row = await cursor.fetchone()
         if row is None:
             return None
-        import json
-
         return AuditRecord(
             id=row["id"],
             proposal_id=row["proposal_id"],
@@ -178,14 +181,12 @@ class Database:
 
     async def list_audit_records(self, limit: int = 50) -> list[AuditRecord]:
         """List recent audit records."""
-        assert self._conn is not None, "Database not connected"
-        cursor = await self._conn.execute(
+        conn = self._ensure_connected()
+        cursor = await conn.execute(
             "SELECT * FROM audit_records ORDER BY timestamp DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()
-        import json
-
         return [
             AuditRecord(
                 id=row["id"],
@@ -199,3 +200,17 @@ class Database:
             )
             for row in rows
         ]
+
+    async def get_last_sweep_timestamp(self) -> float | None:
+        """Get timestamp of last confirmed sweep as Unix epoch. Returns None if none found."""
+        conn = self._ensure_connected()
+        cursor = await conn.execute(
+            """SELECT timestamp FROM audit_records
+               WHERE status = 'confirmed'
+               ORDER BY timestamp DESC LIMIT 1"""
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        from datetime import datetime
+        return datetime.fromisoformat(row["timestamp"]).timestamp()
