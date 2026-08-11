@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from pathlib import Path
+from typing import Any, TypeVar
 
 import click
 from dotenv import load_dotenv
@@ -19,13 +21,14 @@ load_dotenv()
 
 console = Console()
 
+T = TypeVar("T")
 
-def run_async(coro):
+
+def run_async(coro: Coroutine[Any, Any, T]) -> T:
     """Run async function from sync CLI."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Already in async context
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 return pool.submit(asyncio.run, coro).result()
@@ -146,7 +149,7 @@ def evaluate(ctx: click.Context) -> None:
         read_balances_node,
     )
 
-    async def _evaluate():
+    async def _evaluate() -> dict[str, Any]:
         state = WorkflowState(config=config)
         result = await load_policy_node(state)
         for k, v in result.items():
@@ -192,7 +195,7 @@ def propose(ctx: click.Context) -> None:
         validate_proposal_node,
     )
 
-    async def _propose():
+    async def _propose() -> WorkflowState:
         state = WorkflowState(config=config)
         result = await load_policy_node(state)
         for k, v in result.items():
@@ -286,11 +289,11 @@ def execute(ctx: click.Context, proposal_id: str) -> None:
         console.print(f"[bold]Executing sweep: {proposal.amount}[/bold]")
 
         # Execute via KeeperHub
-        from sweepai.adapters.keeperhub import KeeperHubExecutionAdapter
+        from sweepai.adapters.keeperhub import ExecutionResult, KeeperHubExecutionAdapter
 
         adapter = KeeperHubExecutionAdapter(config.keeperhub)
 
-        async def _execute():
+        async def _execute() -> ExecutionResult | None:
             # Simulate first
             console.print("[yellow]Simulating...[/yellow]")
             sim = await adapter.simulate_transfer(
@@ -484,6 +487,78 @@ def _load_config(ctx: click.Context) -> AppConfig:
     """Load configuration from context."""
     config_path = ctx.obj.get("config_path", "config/config.toml")
     return load_config(config_path)
+
+
+@cli.command()
+@click.option("--interval", "-i", default=3600, help="Seconds between sweeps")
+@click.pass_context
+def cron(ctx: click.Context, interval: int) -> None:
+    """Run periodic sweep checks (for systemd/cron)."""
+    import time as time_module
+
+    config = _load_config(ctx)
+    console.print(f"[bold]SweepAI Cron starting (interval: {interval}s)[/bold]")
+
+    while True:
+        try:
+            _run_sweep_cycle(config)
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+
+        time_module.sleep(interval)
+
+
+def _run_sweep_cycle(config: AppConfig) -> None:
+    """Run a single sweep cycle."""
+    from sweepai.workflow.nodes import (
+        WorkflowState,
+        analyze_node,
+        audit_node,
+        execute_node,
+        load_policy_node,
+        read_balances_node,
+        validate_proposal_node,
+    )
+
+    async def _cycle() -> str | None:
+        state = WorkflowState(config=config)
+        result = await load_policy_node(state)
+        for k, v in result.items():
+            setattr(state, k, v)
+        if state.error:
+            return state.error
+
+        result = await read_balances_node(state)
+        for k, v in result.items():
+            setattr(state, k, v)
+        if state.error:
+            return state.error
+
+        result = await analyze_node(state)
+        for k, v in result.items():
+            setattr(state, k, v)
+
+        if state.proposal:
+            result = await validate_proposal_node(state)
+            for k, v in result.items():
+                setattr(state, k, v)
+
+            if state.proposal and state.proposal.status.value == "approved":
+                result = await execute_node(state)
+                for k, v in result.items():
+                    setattr(state, k, v)
+
+        await audit_node(state)
+
+        if state.execution_result and state.execution_result.transaction_hash:
+            return state.execution_result.transaction_hash
+        return None
+
+    tx_hash = run_async(_cycle())
+    if tx_hash:
+        console.print(f"[bold green]Sweep executed: {tx_hash}[/bold green]")
+    else:
+        console.print("[dim]No sweep needed[/dim]")
 
 
 if __name__ == "__main__":
