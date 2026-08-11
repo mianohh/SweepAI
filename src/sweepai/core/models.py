@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
@@ -51,6 +51,23 @@ class TreasuryPolicy:
     allowed_destinations: tuple[str, ...]
     chain_ids: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        from decimal import Decimal
+
+        threshold = Decimal(self.sweep_threshold)
+        min_sweep = Decimal(self.min_sweep_amount)
+        max_sweep = Decimal(self.max_sweep_amount)
+        reserve = Decimal(self.gas_reserve)
+
+        if min_sweep >= max_sweep:
+            raise ValueError("min_sweep_amount must be less than max_sweep_amount")
+        if reserve >= threshold:
+            raise ValueError("gas_reserve must be less than sweep_threshold")
+        if not self.allowed_destinations:
+            raise ValueError("At least one allowed destination is required")
+        if not self.chain_ids:
+            raise ValueError("At least one chain ID is required")
+
     def is_destination_allowed(self, address: str) -> bool:
         """Check if destination address is in allowlist."""
         return address.lower() in {d.lower() for d in self.allowed_destinations}
@@ -71,7 +88,7 @@ class SweepProposal:
     chain_id: str = ""
     token_address: str | None = None
     reason: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     status: SweepState = SweepState.PROPOSED
 
     def approve(self) -> None:
@@ -100,5 +117,5 @@ class AuditRecord:
     status: SweepState = SweepState.IDLE
     gas_used: str | None = None
     error: str | None = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, str] = field(default_factory=dict)
