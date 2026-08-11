@@ -1,0 +1,25 @@
+[Unit]
+Description=SweepAI Treasury Sweep Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=miano
+WorkingDirectory=/home/miano/SweepAI
+Environment="PATH=/home/miano/SweepAI/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/miano/SweepAI/venv/bin/sweepai cron --interval 60
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sweepai
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/miano/SweepAI/data
+
+[Install]
+WantedBy=multi-user.target
