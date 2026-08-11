@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +12,8 @@ from typing import Any
 import httpx
 
 from sweepai.core.config import KeeperHubConfig
+
+logger = logging.getLogger("sweepai.keeperhub")
 
 
 @dataclass
@@ -41,6 +45,7 @@ class KeeperHubExecutionAdapter:
     Isolates all KeeperHub-specific code.
 
     Uses Direct Execution API for transfers with simulation-first approach.
+    Includes retry logic with exponential backoff for transient failures.
     """
 
     def __init__(self, config: KeeperHubConfig) -> None:
@@ -64,6 +69,55 @@ class KeeperHubExecutionAdapter:
         """Close HTTP client."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        max_retries: int = 3,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Make HTTP request with retry logic for transient failures."""
+        last_error: Exception | None = None
+
+        for attempt in range(max_retries):
+            try:
+                client = await self._get_client()
+                response = await client.request(method, url, **kwargs)
+
+                # Retry on rate limit or server errors
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("Retry-After", "5"))
+                    logger.warning(
+                        "Rate limited, waiting %.1fs (attempt %d/%d)",
+                        retry_after, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                if response.status_code >= 500:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        "Server error %d, waiting %ds (attempt %d/%d)",
+                        response.status_code, wait_time, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                return response
+
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_error = e
+                wait_time = 2 ** attempt
+                logger.warning(
+                    "Request failed: %s, waiting %ds (attempt %d/%d)",
+                    e, wait_time, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(wait_time)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Request failed after {max_retries} attempts")
 
     def _generate_idempotency_key(
         self,
@@ -118,8 +172,6 @@ class KeeperHubExecutionAdapter:
         token_address: str | None = None,
     ) -> SimulationResult:
         """Simulate a transfer without broadcasting."""
-        client = await self._get_client()
-
         payload: dict[str, Any] = {
             "chainId": chain_id,
             "recipientAddress": recipient,
@@ -129,11 +181,18 @@ class KeeperHubExecutionAdapter:
         if token_address:
             payload["tokenAddress"] = token_address
 
-        response = await client.post("/execute/transfer", json=payload)
+        logger.info(
+            "Simulating transfer: chain=%s, recipient=%s, amount=%s",
+            chain_id, recipient[:10] + "...", amount,
+        )
+
+        response = await self._request_with_retry(
+            "POST", "/execute/transfer", json=payload,
+        )
 
         if response.status_code == 200:
             data = response.json()
-            return SimulationResult(
+            result = SimulationResult(
                 success=data.get("success", True),
                 would_revert=data.get("wouldRevert", False),
                 from_address=data.get("from"),
@@ -141,9 +200,18 @@ class KeeperHubExecutionAdapter:
                 revert_reason=data.get("revertReason"),
                 raw_response=data,
             )
+            logger.info(
+                "Simulation result: success=%s, would_revert=%s",
+                result.success, result.would_revert,
+            )
+            return result
         else:
             ct = response.headers.get("content-type", "")
             data = response.json() if ct.startswith("application/json") else {}
+            logger.error(
+                "Simulation failed: status=%d, error=%s",
+                response.status_code, data.get("error"),
+            )
             return SimulationResult(
                 success=False,
                 would_revert=data.get("wouldRevert", False),
@@ -164,8 +232,6 @@ class KeeperHubExecutionAdapter:
 
         Uses idempotency key for safe retries.
         """
-        client = await self._get_client()
-
         idempotency_key = self._generate_idempotency_key(
             task_id=task_id,
             chain_id=chain_id,
@@ -182,7 +248,13 @@ class KeeperHubExecutionAdapter:
         if token_address:
             payload["tokenAddress"] = token_address
 
-        response = await client.post(
+        logger.info(
+            "Executing transfer: chain=%s, recipient=%s, amount=%s",
+            chain_id, recipient[:10] + "...", amount,
+        )
+
+        response = await self._request_with_retry(
+            "POST",
             "/execute/transfer",
             json=payload,
             headers={"Idempotency-Key": idempotency_key},
@@ -190,28 +262,35 @@ class KeeperHubExecutionAdapter:
 
         if response.status_code in (200, 202):
             data = response.json()
-            return ExecutionResult(
+            result = ExecutionResult(
                 execution_id=data.get("executionId", ""),
                 status=data.get("status", "pending"),
                 transaction_hash=data.get("transactionHash"),
                 transaction_link=data.get("transactionLink"),
                 raw_response=data,
             )
+            logger.info(
+                "Execution submitted: id=%s, status=%s, tx=%s",
+                result.execution_id, result.status, result.transaction_hash or "pending",
+            )
+            return result
         else:
             ct = response.headers.get("content-type", "")
             data = response.json() if ct.startswith("application/json") else {}
+            error_msg = data.get("error", f"HTTP {response.status_code}")
+            logger.error("Execution failed: %s", error_msg)
             return ExecutionResult(
                 execution_id="",
                 status="failed",
-                error=data.get("error", f"HTTP {response.status_code}"),
+                error=error_msg,
                 raw_response=data,
             )
 
     async def get_execution_status(self, execution_id: str) -> ExecutionResult:
         """Poll execution status."""
-        client = await self._get_client()
-
-        response = await client.get(f"/execute/{execution_id}/status")
+        response = await self._request_with_retry(
+            "GET", f"/execute/{execution_id}/status",
+        )
 
         if response.status_code == 200:
             data = response.json()
@@ -254,7 +333,6 @@ class KeeperHubExecutionAdapter:
                 except (ValueError, TypeError):
                     pass
 
-            import asyncio
             await asyncio.sleep(poll_interval)
 
         return ExecutionResult(
